@@ -5,7 +5,8 @@ from loguru import logger
 import re
 
 from db.users import user_manager
-from db.deposits import deposit_manager
+from db.deposits import deposit_manager, DepositStatus  # Add DepositStatus here
+from db.mongo import mongodb
 from services.api_client import api_client, APIRequestError, APIResponseError
 from config import config
 
@@ -179,7 +180,7 @@ class DepositHandler:
         else:
             await event.respond(message, buttons=buttons, parse_mode="html")
         
-        logger.info(f"Sent deposit instructions to user {user_id} for wallet {short_wallet}")
+        logger.info(f"Sent deposit instructions to user for wallet {short_wallet}")
     
     async def handle_check_status(self, event):
         """Handle check status button press."""
@@ -189,9 +190,6 @@ class DepositHandler:
         user_id = event.sender_id
         
         try:
-            # Check deposit status in database
-            from db.deposits import deposit_manager, DepositStatus
-            
             # Find deposit by wallet
             db = mongodb.db
             deposits_collection = db["deposits"]
