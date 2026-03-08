@@ -1,11 +1,15 @@
 from telethon import events, Button
 from telethon.tl.custom import Message
+from telethon.tl.types import InputMediaPhotoExternal
 from typing import Optional, Dict, Any
 from loguru import logger
 import re
+import base64
+import io
+from PIL import Image  # You'll need to install Pillow
 
 from db.users import user_manager
-from db.deposits import deposit_manager, DepositStatus  # Add DepositStatus here
+from db.deposits import deposit_manager, DepositStatus
 from db.mongo import mongodb
 from services.api_client import api_client, APIRequestError, APIResponseError
 from config import config
@@ -167,20 +171,61 @@ class DepositHandler:
             [Button.inline("🔄 Check Status", data=f"check_{wallet}")]
         ]
         
-        # Add QR code if available
-        if wallet_data.get("qr"):
-            # In Telethon, you can send photo with caption
-            await event.client.send_file(
-                event.chat_id,
-                wallet_data["qr"],
-                caption=message,
-                buttons=buttons,
-                parse_mode="html"
-            )
-        else:
-            await event.respond(message, buttons=buttons, parse_mode="html")
+        # Handle QR code (could be URL or base64)
+        qr_code = wallet_data.get("qr")
         
-        logger.info(f"Sent deposit instructions to user for wallet {short_wallet}")
+        if qr_code:
+            try:
+                # Check if it's a base64 string
+                if qr_code.startswith('data:image'):
+                    # Extract base64 data
+                    base64_data = qr_code.split(',')[1] if ',' in qr_code else qr_code
+                    
+                    # Decode base64 to bytes
+                    image_bytes = base64.b64decode(base64_data)
+                    
+                    # Create a file-like object
+                    image_file = io.BytesIO(image_bytes)
+                    image_file.name = 'qrcode.png'
+                    
+                    # Send as photo
+                    await event.client.send_file(
+                        event.chat_id,
+                        image_file,
+                        caption=message,
+                        buttons=buttons,
+                        parse_mode="html"
+                    )
+                    logger.info(f"Sent QR code as base64 image to user")
+                    
+                elif qr_code.startswith(('http://', 'https://')):
+                    # It's a URL - send as photo from URL
+                    await event.client.send_file(
+                        event.chat_id,
+                        qr_code,
+                        caption=message,
+                        buttons=buttons,
+                        parse_mode="html",
+                        force_document=False  # Send as photo, not document
+                    )
+                    logger.info(f"Sent QR code from URL to user")
+                else:
+                    # Assume it's a file path or file ID
+                    await event.client.send_file(
+                        event.chat_id,
+                        qr_code,
+                        caption=message,
+                        buttons=buttons,
+                        parse_mode="html"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Failed to send QR code: {e}")
+                # Fallback to text-only message
+                await event.respond(message, buttons=buttons, parse_mode="html")
+        else:
+            # No QR code, send text only
+            await event.respond(message, buttons=buttons, parse_mode="html")
     
     async def handle_check_status(self, event):
         """Handle check status button press."""
