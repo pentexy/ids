@@ -1,6 +1,6 @@
 from telethon import events
 from telethon.tl.custom import Message
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from loguru import logger
 import re
 
@@ -14,7 +14,7 @@ class OwnerNotifier:
     """Handle owner notifications and commands."""
     
     # Store pending withdrawals (user_id, deposit_wallet, amount)
-    _pending_withdrawals: Dict[str, tuple] = {}
+    _pending_withdrawals: Dict[str, Tuple[int, str, float]] = {}
     
     async def notify_new_deposit(self, user_id: int, wallet: str, amount: float):
         """Notify owner about new deposit."""
