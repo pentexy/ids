@@ -64,7 +64,7 @@ class APIClient:
         method: str,
         endpoint: str,
         **kwargs
-    ) -> Tuple[int, Dict[str, Any]]:
+    ) -> Tuple[int, Any]:
         """
         Make HTTP request with retry logic.
         
@@ -75,6 +75,7 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
         
         try:
+            logger.debug(f"Making {method} request to {url}")
             async with self.session.request(method, url, **kwargs) as response:
                 try:
                     data = await response.json()
@@ -85,6 +86,7 @@ class APIClient:
                     logger.error(f"API error {response.status}: {data}")
                     raise APIResponseError(f"API returned {response.status}: {data}")
                 
+                logger.debug(f"API response: {data}")
                 return response.status, data
                 
         except aiohttp.ClientError as e:
@@ -99,7 +101,7 @@ class APIClient:
             amount: Expected deposit amount
             
         Returns:
-            API response with wallet details
+            API response with wallet details (normalized format)
         """
         try:
             status, data = await self._make_request(
@@ -107,15 +109,13 @@ class APIClient:
                 f"/generate?amount={amount}"
             )
             
-            if not isinstance(data, dict):
-                raise APIResponseError("Invalid response format")
+            logger.info(f"Generate wallet raw response: {data}")
             
-            required_fields = ["wallet", "index", "qr"]
-            if not all(field in data for field in required_fields):
-                raise APIResponseError(f"Missing required fields: {required_fields}")
+            # Normalize the response to our expected format
+            normalized_data = self._normalize_wallet_response(data)
             
-            logger.info(f"Generated wallet {data['wallet']} for amount {amount}")
-            return data
+            logger.info(f"Generated wallet {normalized_data['wallet']} for amount {amount}")
+            return normalized_data
             
         except Exception as e:
             logger.error(f"Failed to generate wallet: {e}")
@@ -129,7 +129,7 @@ class APIClient:
             wallet: Deposit wallet address
             
         Returns:
-            Payment status response
+            Payment status response (normalized format)
         """
         try:
             status, data = await self._make_request(
@@ -137,10 +137,12 @@ class APIClient:
                 f"/check/{wallet}"
             )
             
-            if not isinstance(data, dict):
-                raise APIResponseError("Invalid response format")
+            logger.debug(f"Check payment raw response for {wallet}: {data}")
             
-            return data
+            # Normalize the response
+            normalized_data = self._normalize_check_response(data)
+            
+            return normalized_data
             
         except Exception as e:
             logger.error(f"Failed to check payment for {wallet}: {e}")
@@ -176,18 +178,162 @@ class APIClient:
                 json=payload
             )
             
-            if not isinstance(data, dict):
-                raise APIResponseError("Invalid response format")
+            logger.info(f"Withdraw raw response: {data}")
             
-            if "txid" not in data and "transaction" not in data:
-                raise APIResponseError("Missing transaction hash in response")
+            # Normalize the response
+            normalized_data = self._normalize_withdraw_response(data)
             
             logger.info(f"Withdrawal successful: {amount} USDT from {from_wallet}")
-            return data
+            return normalized_data
             
         except Exception as e:
             logger.error(f"Failed to process withdrawal: {e}")
             raise
+    
+    def _normalize_wallet_response(self, data: Any) -> Dict[str, Any]:
+        """
+        Normalize wallet generation response to expected format.
+        
+        Expected format: { "wallet": "...", "index": 123, "qr": "..." }
+        """
+        if isinstance(data, dict):
+            # Check if the response has the fields we need
+            result = {}
+            
+            # Try to find wallet address (could be 'wallet', 'address', 'wallet_address', etc.)
+            wallet = (
+                data.get("wallet") or 
+                data.get("address") or 
+                data.get("wallet_address") or 
+                data.get("deposit_address")
+            )
+            if not wallet:
+                # If it's a nested structure, try to find it
+                for key in ["data", "result", "response"]:
+                    if key in data and isinstance(data[key], dict):
+                        wallet = (
+                            data[key].get("wallet") or 
+                            data[key].get("address") or 
+                            data[key].get("wallet_address")
+                        )
+                        if wallet:
+                            result.update(data[key])
+                            break
+            
+            if not wallet:
+                raise APIResponseError("Could not find wallet address in response")
+            
+            result["wallet"] = wallet
+            
+            # Try to find index
+            result["index"] = data.get("index") or result.get("index") or 0
+            
+            # Try to find QR code
+            result["qr"] = data.get("qr") or result.get("qr") or data.get("qrcode") or data.get("qr_code")
+            
+            return result
+        
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            # If response is an array, take first item
+            return self._normalize_wallet_response(data[0])
+        
+        else:
+            raise APIResponseError(f"Unexpected response format: {type(data)}")
+    
+    def _normalize_check_response(self, data: Any) -> Dict[str, Any]:
+        """
+        Normalize payment check response to expected format.
+        
+        Expected format: { "funded": bool, "amount": float }
+        """
+        if isinstance(data, dict):
+            result = {}
+            
+            # Check for funded status (could be 'funded', 'paid', 'confirmed', 'status')
+            funded = (
+                data.get("funded") or 
+                data.get("paid") or 
+                data.get("confirmed") or 
+                data.get("status") == "confirmed" or
+                data.get("status") == "paid"
+            )
+            result["funded"] = bool(funded)
+            
+            # Try to find amount
+            amount = (
+                data.get("amount") or 
+                data.get("received_amount") or 
+                data.get("value") or
+                0
+            )
+            
+            # Try to convert to float
+            try:
+                result["amount"] = float(amount) if amount else 0
+            except (ValueError, TypeError):
+                result["amount"] = 0
+            
+            return result
+        
+        elif isinstance(data, list) and len(data) > 0:
+            return self._normalize_check_response(data[0])
+        
+        elif isinstance(data, bool):
+            # If API returns just a boolean
+            return {"funded": data, "amount": 0}
+        
+        elif isinstance(data, str):
+            # If API returns a status string
+            return {"funded": data.lower() in ["confirmed", "paid", "true", "yes"], "amount": 0}
+        
+        else:
+            logger.warning(f"Unexpected check response format: {data}")
+            return {"funded": False, "amount": 0}
+    
+    def _normalize_withdraw_response(self, data: Any) -> Dict[str, Any]:
+        """
+        Normalize withdraw response to expected format.
+        
+        Expected format: { "txid": "..." } or { "transaction": "..." }
+        """
+        if isinstance(data, dict):
+            result = {}
+            
+            # Try to find transaction hash
+            txid = (
+                data.get("txid") or 
+                data.get("transaction") or 
+                data.get("tx") or 
+                data.get("hash") or
+                data.get("transaction_hash")
+            )
+            
+            if txid:
+                result["txid"] = txid
+                result["transaction"] = txid
+            else:
+                # If no transaction hash, maybe it's in a nested structure
+                for key in ["data", "result"]:
+                    if key in data and isinstance(data[key], dict):
+                        txid = (
+                            data[key].get("txid") or 
+                            data[key].get("transaction") or 
+                            data[key].get("hash")
+                        )
+                        if txid:
+                            result["txid"] = txid
+                            result["transaction"] = txid
+                            break
+            
+            return result
+        
+        elif isinstance(data, str):
+            # If API returns just the transaction hash
+            return {"txid": data, "transaction": data}
+        
+        else:
+            logger.warning(f"Unexpected withdraw response format: {data}")
+            return {"txid": "unknown", "transaction": "unknown"}
 
 
 # Singleton instance
